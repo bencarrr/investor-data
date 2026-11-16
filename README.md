@@ -1,58 +1,163 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+## Setup Notes
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Very Standard Laravel Install, use a sql DB of your choice.
 
-## About Laravel
+**Queueing**
+Imports run on the queue, so keep a worker running with `php artisan queue:work`. Without one, imports stay `pending`. `DB_QUEUE_RETRY_AFTER` (660 in `.env.example`) must be longer than the job's 600-second timeout, or a slow import can be picked up twice.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+**Import File Sizes**
+`POST /api/v1/imports` accepts CSVs up to 20 MB, but every layer in front of Laravel has its own upload limit and the smallest one wins. Raise PHP's limits (`upload_max_filesize = 20M`, `post_max_size = 21M`; the default is 2 MB) and your web server's, e.g. for nginx add `client_max_body_size 21m;` to the location that passes the import request to PHP (the default is 1 MB).
+Also extend the timeout in your environment
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Endpoints
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+All endpoints are under `/api/v1` and return JSON (validation errors return `422`).
 
-## Learning Laravel
+No Authentication required.
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+### `POST /api/v1/imports` — import a CSV
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+Multipart upload with a `file` field. The file must be detected as CSV (`mimes:csv`), be at most 20 MB, and have exactly this header:
 
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
-
-```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+```
+investor_id,name,age,investment_amount,investment_date
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+```bash
+curl -X POST http://localhost:8000/api/v1/imports \
+  -H "Accept: application/json" \
+  -F "file=@tests/Fixtures/investors.csv"
+```
 
-## Contributing
+The file is stored and queued, and the response is `202 Accepted` with a `Location` header pointing at the import's status:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```json
+{
+  "data": {
+    "id": 1,
+    "status": "pending",
+    "total_rows": null,
+    "imported_rows": 0,
+    "failed_rows": 0,
+    "errors": [],
+    "failure_reason": null,
+    "created_at": "...",
+    "updated_at": "..."
+  }
+}
+```
 
-## Code of Conduct
+### `GET /api/v1/imports/{id}` — import status
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+`status` moves from `pending` to `processing`, then to `completed` or `failed`. When it's `completed`, the counts and row errors are filled in. When it's `failed`, `failure_reason` explains why.
 
-## Security Vulnerabilities
+```json
+{
+  "data": {
+    "id": 1,
+    "status": "completed",
+    "total_rows": 200,
+    "imported_rows": 200,
+    "failed_rows": 0,
+    "errors": [],
+    "failure_reason": null,
+    "created_at": "...",
+    "updated_at": "..."
+  }
+}
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Rows are checked one at a time:
 
-## License
+| Column | Rule |
+|---|---|
+| `investor_id` | required, integer, ≥ 1 |
+| `name` | required, string, ≤ 255 characters |
+| `age` | required, integer, 18–120 |
+| `investment_amount` | required, number > 0, at most 2 decimal places |
+| `investment_date` | required, `d-m-Y` (e.g. `13-11-2024`), not in the future |
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+Invalid rows are skipped and listed under `errors` with their line number (the header is line 1). `failed_rows` counts every invalid row; `errors` keeps the first 100.
+
+### `GET /api/v1/stats/average-age`
+
+```json
+{ "data": { "average_age": 47 } }
+```
+
+### `GET /api/v1/stats/average-investment-amount`
+
+```json
+{ "data": { "average_investment_amount": 541234.56 } }
+```
+
+### `GET /api/v1/stats/total-investments`
+
+```json
+{ "data": { "total_investments": 200 } }
+```
+
+Averages are `null` when there is no data.
+
+### `GET /api/v1/investors` — list investors
+
+Query parameters: `per_page` (1–1000, default 100), `cursor`, `format` (`json` or `csv`).
+
+```json
+{
+  "data": [
+    { "investor_id": 1001, "name": "Daniel Nelson", "age": 28, "total_investment_amount": "328085.43" }
+  ],
+  "links": { "first": null, "last": null, "prev": null, "next": "http://localhost:8000/api/v1/investors?cursor=..." },
+  "meta": { "path": "...", "per_page": 100, "next_cursor": "...", "prev_cursor": null }
+}
+```
+
+For CSV, send `?format=csv` or `Accept: text/csv`. The CSV contains every investor (it is not paginated):
+
+```bash
+curl http://localhost:8000/api/v1/investors?format=csv -o investors.csv
+```
+
+## Design
+
+- **Service layer.** Controllers only handle HTTP. The work is done by `InvestorImportService`, `InvestorStatisticsService` and `InvestorExportService` in `app/Services`.
+- **Schema.**
+  - `investors` uses the file's `investor_id` as its primary key.
+  - `investments` belongs to an investor and is unique on `(investor_id, invested_on)`, so there is one investment per investor per date.
+- **Large files (10k+ rows).**
+  - The upload request only checks the file type, size and header, stores the file, and queues `ProcessInvestorImport`. It returns immediately, so large files don't hit request timeouts.
+  - The job tries up to 3 times. Retrying is safe because the import upserts, so re-running a file never duplicates data. When the import finishes, the stored file is deleted.
+  - The import streams the file one line at a time with `SplFileObject`, so the whole file is never held in memory.
+  - Valid rows are bulk-upserted 1,000 at a time, two queries per chunk, each chunk in its own transaction.
+- **Reads at scale.**
+  - Statistics are single SQL aggregates (`AVG` / `COUNT`).
+  - The investor list uses cursor pagination, which stays fast deep into the list, and `withSum` to avoid N+1 queries.
+  - The CSV export streams rows using `lazyById`, so memory stays flat.
+
+## Assumptions
+
+- If the same investor and date appear more than once, the **last row wins**. The same applies to an investor's name and age. Importing a file again updates existing data instead of duplicating it.
+- "Average investment amount" is the mean over all investment rows. In the sample file every investor has one investment, so this equals the mean per investor.
+- An investor's "investment amount" in the listing is the sum of their investments.
+- Uploads are stored on the default filesystem disk. The worker must be able to read that disk, so with several servers it should be shared storage such as S3.
+- Imports can run at the same time. If two files touch the same investor, whichever finishes later wins.
+
+## With more time
+
+- **Validate the whole file before writing.** Today the file is read once and the last row for an investor and date wins silently. I would instead:
+  1. Load rows into a staging table (`import_rows`).
+  2. Use grouped queries to find any date repeated for the same investor (`GROUP BY investor_id, invested_on HAVING COUNT(*) > 1`) and any investor whose name or age changes between rows.
+  3. Reject the whole file if anything is found, listing every conflict with its line numbers.
+  4. Write a clean file ordered by `investor_id`, so each chunk holds every row for its investors, all in one transaction.
+
+  This makes imports all-or-nothing and stops data from being overwritten without notice.
+- **Atomic imports.** A failure partway through currently leaves earlier chunks committed. A retry re-runs the whole file, so the data ends up correct, but other endpoints can see partial data in the meantime.
+- **Progress and notifications.** Update the import's counts after each chunk so clients can show progress, and send a webhook when an import finishes instead of making clients poll.
+- **Serialise imports.** Run imports one at a time (a dedicated queue with one worker, or `WithoutOverlapping`) so two files touching the same investors can't overwrite each other unpredictably or deadlock.
+- **Clean up old uploads** left behind by failed imports.
+- **Cache the statistics** and clear the cache when an import completes.
+- **Authentication and rate limiting** (e.g. Sanctum).
+- **Stricter CSV detection.** `mimes:csv` inspects the file's content, so an unusual CSV (e.g. a single column) can be detected as plain text and rejected.
+- **Very large files.** Use larger chunks or `LOAD DATA INFILE` for millions of rows.
+- **Unfinished imports show in stats** While an import is running, the stats and investor endpoints already include the chunks it has saved so far.
