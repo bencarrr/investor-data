@@ -1,6 +1,34 @@
-## Setup Notes
+## Running the project
 
 Very Standard Laravel Install, use a sql DB of your choice.
+
+You need PHP 8.3+, Composer and a database (MySQL, or SQLite for a quick local run).
+
+1. Install dependencies and create your `.env`:
+   ```bash
+   composer install
+   cp .env.example .env
+   php artisan key:generate
+   ```
+2. Set the `DB_*` values in `.env` for your database, then create the tables:
+   ```bash
+   php artisan migrate
+   ```
+3. Start the app and a queue worker, each in its own terminal:
+   ```bash
+   php artisan serve
+   php artisan queue:work
+   ```
+4. Import the sample file, then check the result at the URL in the response's `Location` header:
+   ```bash
+   curl -i -X POST http://localhost:8000/api/v1/imports -H "Accept: application/json" -F "file=@tests/Fixtures/investors.csv"
+   ```
+5. Run the tests:
+   ```bash
+   php artisan test
+   ```
+
+## Setup Notes
 
 **Queueing**
 Imports run on the queue, so keep a worker running with `php artisan queue:work`. Without one, imports stay `pending`. `DB_QUEUE_RETRY_AFTER` (660 in `.env.example`) must be longer than the job's 600-second timeout, or a slow import can be picked up twice.
